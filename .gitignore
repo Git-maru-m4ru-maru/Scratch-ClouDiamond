@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+node_modules/
+# サーバーの秘密鍵は絶対にコミットしない
+*.key
+server.key

@@ -1,0 +1,4 @@
+include README.md pytest.ini
+recursive-include tests *.py *.js
+recursive-include examples *.py
+prune tests/node_modules
