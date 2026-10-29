@@ -6,9 +6,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
   build:
+    if: github.event_name != 'push' || github.event.head_commit.message == 'Publish cloudiamond-scratch v1.0.0 to production PyPI'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +31,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} != v${VERSION}"; exit 1
           fi
       - name: Manual publish must match an existing GitHub release
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -51,7 +54,7 @@ jobs:
           path: dist/
 
   publish-pypi:
-    if: needs.build.result == 'success' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+    if: needs.build.result == 'success' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'Publish cloudiamond-scratch v1.0.0 to production PyPI'))
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
