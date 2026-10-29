@@ -97,9 +97,10 @@ class CloudBridge:
 
     def __init__(self, server: SecureServer, write: Callable[[str, str], None], *,
                  min_interval: float = 0.0, prefix: str = P.CLOUD_PREFIX,
-                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep):
+                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+                 seq_start: int | None = None):
         self.server = server
-        self.core = BridgeCore(server, prefix=prefix)
+        self.core = BridgeCore(server, prefix=prefix, seq_start=seq_start)
         self._write = write
         self._gap = min_interval
         self._clock, self._sleep = clock, sleep
