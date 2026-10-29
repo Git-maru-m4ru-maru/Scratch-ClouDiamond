@@ -203,9 +203,9 @@ def test_bridge_full_session_through_cloud_variable_encoding():
 def test_bridge_header_always_changes_even_across_sessions():
     bridge, server, wire, _ = new_bridge()
     hdrs = []
-    for _ in range(5):
+    for seq in range(1, 6):
         client = cr.ScratchClient(list(server.public_key), list(os.urandom(32)))
-        feed(bridge, bytes(client.hello()), 1)
+        feed(bridge, bytes(client.hello()), seq)
         hdrs.append([v for n, v in wire.writes if short_name(n) == S2C_HDR][-1])
     assert len(set(hdrs)) == 5                                  # 新しいセッションの最初の返信でも HDR は前回と違う
     b2 = CloudBridge(server, Wire())
@@ -223,14 +223,15 @@ def test_bridge_ignores_unrelated_garbage_and_duplicates():
     for bad in ("", "x", "1", "100000101", "1999999ab", "100000199", "1000001000"):
         bridge.on_variable(C2S_HDR, bad)                        # 壊れた HDR で例外を出さない
     assert wire.writes == []
-    feed(bridge, bytes(client.hello()), 1)
+    hello = bytes(client.hello())
+    feed(bridge, hello, 2)
     n = len(wire.writes)
-    bridge.on_variable(C2S_HDR, to_slots(bytes(client.hello()), 1)[1])    # 同じ HDR の再通知(再接続時の再送など)
+    bridge.on_variable(C2S_HDR, to_slots(hello, 2)[1])    # 同じ HDR の再通知(再接続時の再送など)
     assert len(wire.writes) == n                                # 処理はされるが、サーバーが重複 HELLO を拒否 = 返信しない
     client.on_reply(list(wire.last_frame()[1]))
     for junk in (os.urandom(80), os.urandom(200)):
         feed(bridge, junk, 7)
-    assert got == [] and server.session_count() == 1
+    assert got == [] and len(server.sessions) == 1
 
 
 def test_bridge_push_from_server():
