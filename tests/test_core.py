@@ -317,7 +317,7 @@ def test_forward_secrecy_static_key_leak_is_not_enough():
 
 def test_session_expiry_and_limits():
     t = [0.0]
-    srv = ss.SecureServer(on_message=lambda s, d: d, idle_timeout=10, max_sessions=2, clock=lambda: t[0])
+    srv = ss.SecureServer(os.urandom(32), on_message=lambda s, d: d, idle_timeout=10, max_sessions=2, clock=lambda: t[0])
     c1 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     c2 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     c3 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
@@ -330,7 +330,7 @@ def test_session_expiry_and_limits():
 
 
 def test_hello_rate_limit():
-    srv = ss.SecureServer(hello_burst=3, hello_per_sec=0.0, clock=lambda: 0.0)
+    srv = ss.SecureServer(os.urandom(32), hello_burst=3, hello_per_sec=0.0, clock=lambda: 0.0)
     n = 0
     for _ in range(10):
         c = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
@@ -349,7 +349,9 @@ def test_client_limits_reply_flood():
 
 # ============================================================ クラウド変数コーデック
 def test_digits_and_slots_roundtrip_within_256_digits():
-    for n in (0, 1, 41, 73, 84, 85, 168, 300, 336):
+    with pytest.raises(ValueError):
+        ss.to_slots(b"", 0)
+    for n in (1, 41, 73, 84, 85, 168, 300, 336):
         frame = os.urandom(n)
         slots, hdr = ss.to_slots(frame, seq=123456 + n)
         assert all(len(s) <= 256 and s.isdigit() for s in slots) and hdr.isdigit()
