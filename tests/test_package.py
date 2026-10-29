@@ -162,7 +162,7 @@ def new_bridge(**kw):
     got = []
     server = ss.SecureServer(X25519PrivateKey.generate(), on_message=lambda sid, d: (got.append(d), d[::-1])[1], **kw)
     wire = Wire()
-    return CloudBridge(server, wire, seq_start=10), server, wire, got
+    return CloudBridge(server, wire), server, wire, got
 
 
 def test_bridge_full_session_through_cloud_variable_encoding():
@@ -196,10 +196,11 @@ def test_bridge_header_always_changes_even_across_sessions():
         feed(bridge, bytes(client.hello()), 1)
         hdrs.append([v for n, v in wire.writes if n == S2C_HDR][-1])
     assert len(set(hdrs)) == 5                                  # 新しいセッションの最初の返信でも HDR は前回と違う
-    b2 = CloudBridge(server, Wire(), seq_start=999999)
-    b2._emit(b"x" * 41); b2._emit(b"y" * 41)                   # 上限で巡回しても連続して同じ値にならない
-    h = [v for n, v in b2._write.writes if n == S2C_HDR]
-    assert h[0] != h[1]
+    b2 = CloudBridge(server, Wire())
+    b2.core._seq = 999_999
+    h1 = b2.core._writes(b"x" * 41)[-1][1]
+    h2 = b2.core._writes(b"y" * 41)[-1][1]
+    assert h1 != h2                                                # 上限で巡回しても連続して同じ値にならない
 
 
 def test_bridge_ignores_unrelated_garbage_and_duplicates():
@@ -225,7 +226,9 @@ def test_bridge_push_from_server():
     client = cr.ScratchClient(list(server.public_key), list(os.urandom(32)))
     feed(bridge, bytes(client.hello()), 1)
     assert client.on_reply(list(wire.last_frame()[1]))
-    assert bridge.push(bytes(client.sid), b"hello from server")
+    assert bridge.push(bytes(client.sid), b"hello from server") is None
     assert bytes(client.open(list(wire.last_frame()[1]))) == b"hello from server"
-    assert not bridge.push(b"\0" * 8, b"nobody")                # 存在しないセッション
-    assert not bridge.push(bytes(client.sid), b"x" * 400)       # スロットに入らない長さ
+    with pytest.raises(ss.UnknownSession):
+        bridge.push(b"\0" * 8, b"nobody")                       # 存在しないセッション
+    with pytest.raises(ss.MessageTooLarge):
+        bridge.push(bytes(client.sid), b"x" * 400)               # スロットに入らない長さ
