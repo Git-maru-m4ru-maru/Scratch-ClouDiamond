@@ -138,10 +138,10 @@ def connect(P, server, pinned_pub=None):
     P.ss_make_hello()
     hello = read(P.TXF, P.TXL)
     out = server.handle_frame(hello)
-    assert len(out) == 1
-    P.RXL = len(out[0]); fill(P.RXF, out[0])
+    assert out is not None
+    P.RXL = len(out); fill(P.RXF, out)
     P.ss_derive_and_verify()
-    return hello, out[0]
+    return hello, out
 
 
 def make_server(**kw):
@@ -173,8 +173,8 @@ def test_handshake_and_both_directions(P):
     for msg in (b"hello", b"", b"x" * 31, b"\x00\xff" * 70, bytes(range(256)) + b"z" * 30):   # 最後は最大長 286 byte
         frame, replies = client_send(P, server, msg)
         assert got[-1] == msg and len(frame) <= 336
-        assert len(replies) == 1
-        assert client_receive(P, replies[0]) == msg[::-1]
+        assert replies is not None
+        assert client_receive(P, replies) == msg[::-1]
     pushed = server.send(read(P.SID, 8), b"server-push")
     assert client_receive(P, pushed) == b"server-push"
 
@@ -210,7 +210,8 @@ def test_eavesdropper_view_has_no_plaintext(P):
     frames = [hello, reply]
     secret = b"TOP-SECRET-PASSWORD-1234567890"
     f, replies = client_send(P, server, secret)
-    frames += [f] + replies
+    assert replies is not None
+    frames.extend([f, replies])
     assert all(b"TOP-SECRET" not in x for x in frames)
 
 
@@ -219,32 +220,33 @@ def test_replayed_and_tampered_frames_are_rejected_by_server(P):
     connect(P, server)
     f1, _ = client_send(P, server, b"one")
     assert got == [b"one"]
-    assert server.handle_frame(f1) == []               # 再送
+    assert server.handle_frame(f1) is None             # 再送
     P.SS_TX.clear(); P.SS_TX.append(1); P.ss_seal()
     good = read(P.TXF, P.TXL)
     rnd = random.Random(2)
     for _ in range(40):
         i, bit = rnd.randrange(len(good)), 1 << rnd.randrange(8)
         t = bytearray(good); t[i] ^= bit
-        assert server.handle_frame(bytes(t)) == []
+        assert server.handle_frame(bytes(t)) is None
     assert got == [b"one"]                             # 改ざんは 1 件も届かない
-    assert len(server.handle_frame(good)) == 1 and got[-1] == b"\x01"   # 本物は通る(状態が壊れていない)
+    assert server.handle_frame(good) is not None and got[-1] == b"\x01"   # 本物は通る(状態が壊れていない)
 
 
 def test_client_rejects_replayed_tampered_and_reflected_frames(P):
     server, _ = make_server()
     connect(P, server)
-    _, replies = client_send(P, server, b"ping")
-    r = replies[0]
+    _, r = client_send(P, server, b"ping")
+    assert r is not None
     assert client_receive(P, r) == b"gnip"
     assert client_receive(P, r) is None                # 再送
-    _, replies2 = client_send(P, server, b"pong")
+    _, reply2 = client_send(P, server, b"pong")
+    assert reply2 is not None
     rnd = random.Random(9)
     for _ in range(30):
-        i, bit = rnd.randrange(len(replies2[0])), 1 << rnd.randrange(8)
-        t = bytearray(replies2[0]); t[i] ^= bit
+        i, bit = rnd.randrange(len(reply2)), 1 << rnd.randrange(8)
+        t = bytearray(reply2); t[i] ^= bit
         assert client_receive(P, bytes(t)) is None
-    assert client_receive(P, replies2[0]) == b"gnop"           # 本物はまだ通る(状態が壊れていない)
+    assert client_receive(P, reply2) == b"gnop"           # 本物はまだ通る(状態が壊れていない)
     own, _ = client_send(P, server, b"mine")
     assert client_receive(P, own) is None              # 自分の送信フレームを受信として反射しても通らない
 
@@ -260,7 +262,9 @@ def test_mitm_replacing_R_with_static_key_is_rejected(P):
     server, _ = make_server()
     fill(P.SRV, server.public_key); fill(P.EK, os.urandom(32))
     P.ss_reset_state(); P.ss_make_hello()
-    reply = bytearray(server.handle_frame(read(P.TXF, P.TXL))[0])
+    initial_reply = server.handle_frame(read(P.TXF, P.TXL))
+    assert initial_reply is not None
+    reply = bytearray(initial_reply)
     for bad_R in (server.public_key, bytes(32), (1).to_bytes(32, "little")):
         reply[9:41] = bad_R
         P.RXL = len(reply); fill(P.RXF, bytes(reply))
@@ -275,7 +279,7 @@ def test_attacker_forged_reply_is_rejected(P):
     E = read(P.EP, 32); sid = read(P.SID, 8)
     r = X25519PrivateKey.generate()
     dh = r.exchange(X25519PublicKey.from_public_bytes(E))
-    k_c2s, k_s2c = ss.derive_keys(dh, dh)              # 攻撃者が自分で作れる鍵
+    _master, k_c2s, k_s2c = ss.derive_keys(dh, dh)     # 攻撃者が自分で作れる鍵
     R = r.public_key().public_bytes_raw()
     confirm = ChaCha20Poly1305(k_s2c).encrypt(ss.nonce_for(0), ss.READY, sid + bytes([2]) + E + R)
     forged = sid + bytes([2]) + R + confirm
@@ -287,7 +291,8 @@ def test_reply_flood_is_bounded(P):
     server, _ = make_server()
     fill(P.SRV, server.public_key); fill(P.EK, os.urandom(32))
     P.ss_reset_state(); P.ss_make_hello()
-    real = server.handle_frame(read(P.TXF, P.TXL))[0]
+    real = server.handle_frame(read(P.TXF, P.TXL))
+    assert real is not None
     fake = bytearray(real); fake[-1] ^= 1
     for _ in range(3):
         P.RXL = 73; fill(P.RXF, bytes(fake)); P.ss_derive_and_verify()
@@ -333,7 +338,7 @@ def test_reply_with_valid_tag_but_wrong_confirmation_text_is_rejected(P):
     E = read(P.EP, 32); sid = read(P.SID, 8)
     r = X25519PrivateKey.generate()
     Ek = X25519PublicKey.from_public_bytes(E)
-    k_c2s, k_s2c = ss.derive_keys(sk.exchange(Ek), r.exchange(Ek))      # 本物のサーバーと同じ鍵が作れる
+    _master, k_c2s, k_s2c = ss.derive_keys(sk.exchange(Ek), r.exchange(Ek))
     R = r.public_key().public_bytes_raw()
     aad = sid + bytes([2]) + E + R
     for text in (b"NOT-THE-READY!!!", bytes(16), ss.READY[:15] + b"X"):
