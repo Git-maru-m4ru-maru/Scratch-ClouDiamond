@@ -63,7 +63,8 @@ def test_build_rejects_bad_public_keys(tmp_path, bad):
 
 
 def test_build_key_and_pub_are_mutually_exclusive(tmp_path):
-    assert run_cli("build", "--key", "a", "--pub", "00" * 32) != 0
+    with pytest.raises(SystemExit):
+        run_cli("build", "--key", "a", "--pub", "00" * 32)
 
 
 def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path):
