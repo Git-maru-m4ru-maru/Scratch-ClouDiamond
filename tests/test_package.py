@@ -13,9 +13,9 @@ import sys
 import zipfile
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-
+import cloudiamond_scratch.protocol as P
 import cloudiamond_scratch.server as ss
+from cloudiamond_scratch.keys import public_key
 from cloudiamond_scratch import cli
 from cloudiamond_scratch.bridge import CloudBridge
 from cloudiamond_scratch.protocol import (
@@ -41,11 +41,11 @@ def test_keygen_creates_private_key_with_0600_and_is_idempotent(tmp_path, capsys
     assert stat.S_IMODE(os.stat(key).st_mode) == 0o600
     raw = key.read_bytes()
     assert len(raw) == 32
-    pub = ss.public_bytes(X25519PrivateKey.from_private_bytes(raw))
+    pub = public_key(raw)
     assert pub.hex() in out1 and raw.hex() not in out1      # 画面に秘密鍵を出さない
     assert run_cli("keygen", str(key)) == 0                  # 2 回目は既存の鍵を壊さない
     assert key.read_bytes() == raw
-    assert run_cli("pubkey", str(key)) == 0 and pub.hex() in capsys.readouterr().out
+    assert run_cli("pubkey", "--key", str(key)) == 0 and pub.hex() in capsys.readouterr().out
 
 
 def test_pubkey_and_build_require_existing_key(tmp_path):
@@ -73,7 +73,7 @@ def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path
     key = tmp_path / "server.key"
     run_cli("keygen", str(key))
     priv = key.read_bytes()
-    pub = ss.public_bytes(X25519PrivateKey.from_private_bytes(priv))
+    pub = public_key(priv)
     out = tmp_path / "client.sb3"
     assert run_cli("build", "--key", str(key), "-o", str(out)) == 0
     z = zipfile.ZipFile(out)
@@ -82,7 +82,7 @@ def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path
     # 秘密鍵が、生バイト・16 進・10 進リスト・数字列のどの形でも入っていない
     assert priv not in blob and priv.hex() not in text
     assert json.dumps(list(priv)) not in text and ",".join(map(str, priv)) not in text
-    assert ss.to_digits(priv) not in text
+    assert P.encode_slot(priv) not in text
     # 公開鍵は SRV リストに入っている
     proj = json.loads(z.read("project.json"))
     lists = {v[0]: v[1] for v in proj["targets"][1]["lists"].values()}
@@ -148,11 +148,25 @@ class Wire:
         cur = {}
         for name, v in self.writes:                    # 最後の HDR の直前までに書かれた slot を使う
             cur[name] = v
-        return ss.from_slots(hdr, [cur[S2C_SLOTS[i]] for i in range(n)])
+        return from_slots(hdr, [cur[S2C_SLOTS[i]] for i in range(n)])
+
+
+def to_slots(frame, seq):
+    slots = P.frame_to_slots(frame)
+    return slots, P.make_hdr(seq, len(slots))
+
+
+def from_slots(hdr, slots):
+    parsed = P.parse_hdr(hdr)
+    assert parsed is not None
+    seq, count = parsed
+    frame = P.slots_to_frame(slots[:count])
+    assert frame is not None
+    return seq, frame
 
 
 def feed(bridge, frame, seq):
-    slots, hdr = ss.to_slots(frame, seq)
+    slots, hdr = to_slots(frame, seq)
     for i, s in enumerate(slots):
         bridge.on_variable(C2S_SLOTS[i], s)
     bridge.on_variable(C2S_HDR, hdr)
@@ -160,7 +174,7 @@ def feed(bridge, frame, seq):
 
 def new_bridge(**kw):
     got = []
-    server = ss.SecureServer(X25519PrivateKey.generate(), on_message=lambda sid, d: (got.append(d), d[::-1])[1], **kw)
+    server = ss.SecureServer(os.urandom(32), on_message=lambda sid, d: (got.append(d), d[::-1])[1], **kw)
     wire = Wire()
     return CloudBridge(server, wire), server, wire, got
 
@@ -213,7 +227,7 @@ def test_bridge_ignores_unrelated_garbage_and_duplicates():
     assert wire.writes == []
     feed(bridge, bytes(client.hello()), 1)
     n = len(wire.writes)
-    bridge.on_variable(C2S_HDR, ss.to_slots(bytes(client.hello()), 1)[1])    # 同じ HDR の再通知(再接続時の再送など)
+    bridge.on_variable(C2S_HDR, to_slots(bytes(client.hello()), 1)[1])    # 同じ HDR の再通知(再接続時の再送など)
     assert len(wire.writes) == n                                # 処理はされるが、サーバーが重複 HELLO を拒否 = 返信しない
     client.on_reply(list(wire.last_frame()[1]))
     for junk in (os.urandom(80), os.urandom(200)):
