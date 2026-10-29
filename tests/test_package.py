@@ -84,7 +84,8 @@ def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path
     assert P.encode_slot(priv) not in text
     # 公開鍵は SRV リストに入っている
     proj = json.loads(z.read("project.json"))
-    lists = {v[0]: v[1] for v in proj["targets"][1]["lists"].values()}
+    sprite = next(target for target in proj["targets"] if not target["isStage"])
+    lists = {v[0]: v[1] for v in sprite["lists"].values()}
     assert lists["SRV"] == list(pub)
     # --pub でも同じ .sb3 が得られる
     out2 = tmp_path / "client2.sb3"
@@ -198,7 +199,7 @@ def test_bridge_full_session_through_cloud_variable_encoding():
     assert cur == [] and len(groups) == 2                  # 最後の HDR の後に書き込みが残っていない
     for g in groups:
         *slots, (hname, hval) = g
-        assert short_name(hname) == S2C_HDR and [short_name(n) for n, _ in slots] == S2C_SLOTS[:int(hval[-2:])]
+        assert short_name(hname) == S2C_HDR and [short_name(n) for n, _ in slots] == list(S2C_SLOTS[:int(hval[-2:])])
 
 
 def test_bridge_header_always_changes_even_across_sessions():
@@ -226,9 +227,12 @@ def test_bridge_ignores_unrelated_garbage_and_duplicates():
     assert wire.writes == []
     hello = bytes(client.hello())
     feed(bridge, hello, 2)
+    prior_reply = wire.last_frame()[1]
     n = len(wire.writes)
-    bridge.on_variable(C2S_HDR, to_slots(hello, 2)[1])    # 同じ HDR の再通知(再接続時の再送など)
-    assert len(wire.writes) == n                                # 処理はされるが、サーバーが重複 HELLO を拒否 = 返信しない
+    bridge.on_variable(C2S_HDR, to_slots(hello, 2)[1])    # 同じ HELLO の再送
+    assert len(wire.writes) > n
+    assert wire.last_frame()[1] == prior_reply             # cached reply is replayed unchanged
+    assert server.stats["hello_retransmit"] == 1
     client.on_reply(list(wire.last_frame()[1]))
     for junk in (os.urandom(80), os.urandom(200)):
         feed(bridge, junk, 7)
