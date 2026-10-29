@@ -276,7 +276,7 @@ def test_low_order_points_rejected_by_server_and_client():
     for bad in (bytes(32), (1).to_bytes(32, "little")):    # u=0, u=1 は位数が小さい
         E = bad
         assert server.handle_frame(E[:8] + b"\x01" + E) is None
-    assert server.session_count() == 0
+    assert len(server.sessions) == 0
     # クライアント側: サーバー(攻撃者)が R=0 を返してきた
     first_reply = server.handle_frame(bytes(client.hello()))
     assert first_reply is not None
