@@ -11,15 +11,71 @@ import logging
 import threading
 import time
 from collections import Counter
+
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import protocol as P
-from .crypto import (CryptoError, READY, aead_open, aead_seal, derive_keys, fingerprint,
-                     generate_secret, x25519_public, x25519_shared)
+from .crypto import (
+    CryptoError,
+    LABEL_C2S,
+    LABEL_MASTER,
+    LABEL_S2C,
+    READY,
+    aead_open,
+    aead_seal,
+    derive_keys,
+    fingerprint,
+    generate_secret,
+    hchacha20,
+    x25519_public,
+    x25519_shared,
+)
 from .keys import parse_secret
 
-__all__ = ["SecureServer", "Session", "TokenBucket", "MessageTooLarge", "UnknownSession"]
+__all__ = [
+    "SecureServer", "Session", "TokenBucket", "MessageTooLarge", "UnknownSession",
+    "DEFAULT_MAX_PLAIN", "MAX_SLOTS", "SLOT_BYTES", "T_S2C", "READY",
+    "LABEL_C2S", "LABEL_MASTER", "LABEL_S2C", "derive_keys", "hchacha20",
+    "nonce_for", "to_slots", "from_slots", "from_digits",
+]
+
+DEFAULT_MAX_PLAIN = P.MAX_MESSAGE
+MAX_SLOTS = P.MAX_SLOTS
+SLOT_BYTES = P.SLOT_BYTES
+T_S2C = P.T_S2C
+
+
+def nonce_for(counter: int) -> bytes:
+    return P.data_nonce(counter)
+
+
+def to_slots(frame: bytes, seq: int) -> tuple[list[str], str]:
+    slots = P.frame_to_slots(frame)
+    return slots, str(P.make_hdr(seq, len(slots)))
+
+
+def from_slots(hdr: object, slots: list[object]) -> tuple[int, bytes]:
+    parsed = P.parse_hdr(hdr)
+    if parsed is None:
+        raise ValueError("invalid HDR")
+    seq, count = parsed
+    if len(slots) < count:
+        raise ValueError("not enough slots")
+    frame = P.slots_to_frame(slots[:count])
+    if frame is None:
+        raise ValueError("invalid slot data")
+    return seq, frame
+
+
+def from_digits(value: object) -> bytes:
+    decoded = P.decode_slot(value)
+    if decoded is None or not decoded:
+        raise ValueError("invalid digit string")
+    return decoded
+
 
 log = logging.getLogger("cloudiamond_scratch")
 
@@ -98,7 +154,7 @@ class SecureServer:
 
     def __init__(
         self,
-        static_key: bytes | str,
+        static_key: bytes | str | X25519PrivateKey,
         on_message: Callable[[bytes, bytes], Any] | None = None,
         *,
         handler: Callable[[Session, bytes], Any] | None = None,
@@ -114,9 +170,21 @@ class SecureServer:
         frame_rate: float = 200.0,
         frame_burst: float = 400.0,
         clock: Callable[[], float] = time.monotonic,
+        idle_timeout: float | None = None,
+        hello_per_sec: float | None = None,
     ):
         if on_message is not None and handler is not None:
             raise ValueError("give either on_message or handler, not both")
+        if idle_timeout is not None:
+            session_ttl = idle_timeout
+        if hello_per_sec is not None:
+            hello_rate = hello_per_sec
+        if isinstance(static_key, X25519PrivateKey):
+            static_key = static_key.private_bytes(
+                Encoding.Raw,
+                PrivateFormat.Raw,
+                NoEncryption(),
+            )
         self._s = parse_secret(static_key)
         self.public_key = x25519_public(self._s)
         self.fingerprint = fingerprint(self.public_key)
@@ -189,6 +257,12 @@ class SecureServer:
             frame = self._seal(s, _as_bytes(data))
             self.stats["push"] += 1
             return frame
+
+    def send(self, sid: bytes | str, data: bytes | str) -> bytes | None:
+        try:
+            return self.seal(sid, data)
+        except (UnknownSession, MessageTooLarge):
+            return None
 
     # ----------------------------------------------------------------- internals
     def _drop(self, reason: str) -> None:
