@@ -17,7 +17,14 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 import cloudiamond_scratch.server as ss
 from cloudiamond_scratch import cli
-from cloudiamond_scratch.bridge import (C2S_HDR, C2S_SLOTS, CLOUD_VARIABLES, S2C_HDR, S2C_SLOTS, CloudBridge)
+from cloudiamond_scratch.bridge import CloudBridge
+from cloudiamond_scratch.protocol import (
+    CLOUD_VARIABLES,
+    VAR_C2S_HDR as C2S_HDR,
+    VAR_C2S as C2S_SLOTS,
+    VAR_S2C_HDR as S2C_HDR,
+    VAR_S2C as S2C_SLOTS,
+)
 from cloudiamond_scratch.reference import client as cr
 from cloudiamond_scratch.scratch.build import build_client_sb3
 
