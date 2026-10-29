@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=77"]  # 77 以上: license = "<SPDX式>" と license-files に対応
+requires = ["setuptools>=77"] # 77 以上: license = "<SPDX式>" と license-files に対応
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudiamond-scratch"
-version = "0.1.0"
-description = "Encrypted Scratch <-> Python communication over cloud variables: X25519 + ChaCha20-Poly1305, with the Scratch client generated as an .sb3 and verified on the real Scratch VM."
+version = "1.0.0"
+description = "Encrypted Scratch <-> Python communication over cloud variables (X25519 + ChaCha20-Poly1305). The Scratch client is generated as an .sb3; includes audit/verify tools and an optional asyncio transport."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -13,22 +13,33 @@ license-files = ["LICENSE"]
 dependencies = ["cryptography>=42"]
 keywords = ["scratch", "turbowarp", "cloud variables", "encryption", "x25519", "chacha20-poly1305", "sb3"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security :: Cryptography",
+    "Topic :: Education",
 ]
-# authors / urls は公開する人が決めて追記する(README の「公開前チェックリスト」参照)
+# authors は公開する人が決めて追記する(README の「公開前チェックリスト」参照。メールアドレスは PyPI で公開されます)
+
+[project.urls]
+Homepage = "https://github.com/Git-maru-m4ru-maru/Scratch-ClouDiamond"
+Repository = "https://github.com/Git-maru-m4ru-maru/Scratch-ClouDiamond"
+Issues = "https://github.com/Git-maru-m4ru-maru/Scratch-ClouDiamond/issues"
+Changelog = "https://github.com/Git-maru-m4ru-maru/Scratch-ClouDiamond/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["pytest>=8", "pycryptodome>=3.20"]
+test = ["pytest>=8"]
 
 [project.scripts]
 cloudiamond-scratch = "cloudiamond_scratch.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cloudiamond_scratch = ["data/*.json", "data/*.svg"]

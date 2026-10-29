@@ -1,4 +1,8 @@
-include README.md pytest.ini
-recursive-include tests *.py *.js
-recursive-include examples *.py
-prune tests/node_modules
+include LICENSE README.md CHANGELOG.md SECURITY.md pytest.ini
+recursive-include docs *.md
+recursive-include examples *.py *.key *.md
+recursive-include tests *.py
+recursive-include tools *.py *.sb3
+include src/cloudiamond_scratch/data/*.json
+include src/cloudiamond_scratch/data/*.svg
+global-exclude __pycache__ *.pyc

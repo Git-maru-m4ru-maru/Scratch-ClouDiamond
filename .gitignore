@@ -1,10 +1,18 @@
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+*.egg-info/
 build/
 dist/
-*.egg-info/
-node_modules/
-# サーバーの秘密鍵は絶対にコミットしない
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# secret keys must never be committed (the public DEMO key is the one exception)
 *.key
-server.key
+!examples/demo_server.key
+
+# a project saved after connecting contains session keys; only commit freshly built / wiped files
+*.sb3
+!tools/upstream/*.sb3
+!releases/*.sb3

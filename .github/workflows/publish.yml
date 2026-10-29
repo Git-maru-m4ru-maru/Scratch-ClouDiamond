@@ -1,74 +1,48 @@
-# PyPI / TestPyPI への公開(Trusted Publishing。API トークンは使いません)
-#
-#   Release を公開(published)  → PyPI       (environment: pypi)
-#   Actions 画面から手動実行    → TestPyPI   (environment: testpypi)
-#
-# Release のタグは "v" + pyproject.toml のバージョン(例: v0.1.0)にしてください。
-# 違うと build ジョブで止まり、アップロードされません。
-#
-# PyPI / TestPyPI 側の Trusted Publisher 登録では、
-#   Workflow name   = publish.yml    (このファイル名。大文字小文字も含めて一致させる)
-#   Environment name = pypi / testpypi
-# を入れます。GitHub の Settings → Environments に同名の environment を作ってください。
+name: Publish to PyPI
 
-name: Publish
-
+# Release published  -> PyPI      (environment "pypi")
+# Manual run         -> TestPyPI  (environment "testpypi")
 on:
   release:
     types: [published]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-
-      - name: Check that the release tag matches the package version
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build twine
+      - name: The release tag must be v<version in pyproject.toml>
         if: github.event_name == 'release'
         run: |
-          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Release tag '$GITHUB_REF_NAME' does not match pyproject.toml version 'v$version'" >&2
-            exit 1
+          VERSION=$(python - <<'PY'
+          import tomllib
+          print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])
+          PY
+          )
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "tag ${GITHUB_REF_NAME} != v${VERSION}"; exit 1
           fi
-
-      - name: Build sdist and wheel
-        run: |
-          python -m pip install --upgrade build twine
-          python -m build
-          python -m twine check --strict dist/*
-
-      - name: Smoke test the built wheel
-        run: |
-          python -m venv "$RUNNER_TEMP/smoke"
-          "$RUNNER_TEMP/smoke/bin/pip" install dist/*.whl
-          "$RUNNER_TEMP/smoke/bin/cloudiamond-scratch" selftest
-
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pytest -q
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
-          if-no-files-found: error
 
   publish-testpypi:
     if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/cloudiamond-scratch
+    environment: testpypi
     permissions:
-      id-token: write # Trusted Publishing に必要(この job だけに付ける)
+      id-token: write       # Trusted Publishing (no API token stored in GitHub)
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -82,11 +56,9 @@ jobs:
     if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/cloudiamond-scratch
+    environment: pypi
     permissions:
-      id-token: write # Trusted Publishing に必要(この job だけに付ける)
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:

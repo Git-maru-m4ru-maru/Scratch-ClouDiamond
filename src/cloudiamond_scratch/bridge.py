@@ -1,84 +1,131 @@
-"""
-bridge.py -- クラウド変数(Scratch / TurboWarp)と SecureServer をつなぐ、通信手段に依存しない橋渡し。
+"""Glue between cloud variables and :class:`SecureServer`.
 
-CloudBridge は WebSocket も scratchattach も知らない。使う側が次の 2 つだけ用意する。
-    on_variable(name, value)    クラウド変数が更新されたら呼ぶ(受信)
-    write(name, value)          クラウド変数を書く関数を渡す(送信。slot を全部書いた「後で」HDR を書く)
+``BridgeCore`` is a pure state machine (no I/O): feed it cloud-variable updates, it returns
+the variable writes to perform. ``CloudBridge`` is the simple callback wrapper
+(``write(name, value)``) that 0.1 users know; the asyncio runner in ``transport`` uses the core
+directly so it can pace frames.
 
-Scratch 側(scratch/program.py)との約束:
-    C2S = クライアント -> サーバー: "☁ C2S_0".."☁ C2S_3"(slot) と "☁ C2S_HDR"(コミット)
-    S2C = サーバー -> クライアント: "☁ S2C_0".."☁ S2C_3" と "☁ S2C_HDR"
-    HDR の値が「変わった」ことが「slot が揃った」合図。だから HDR は書くたびに必ず変わる(seq を増やす)。
-    seq はサーバー全体で単調増加させる。セッションごとに 1 から数え直すと、新しい接続の最初の返信の HDR が
-    前の接続の最後の HDR と同じ値になり、クライアントが「変化なし」と見なしてしまう。
-
-安全性: クラウド変数は誰でも書ける。壊れた値・他人の値は暗号(AEAD)の検証で必ず捨てられる(= 安全側)。
-        捨てられるだけで届かなくはできる(妨害は防げない)。
+Ordering contract (same as the Scratch client): **all slots are written first, then the HDR**,
+and the HDR value changes on every frame.
 """
 from __future__ import annotations
 
-import random
+import logging
+import secrets
 import threading
-from typing import Callable, Dict, List, Optional
+import time
+from typing import Callable
 
-from .server import MAX_SLOTS, SecureServer, from_slots, to_slots
+from . import protocol as P
+from .server import SecureServer, UnknownSession
 
-C2S_HDR = "☁ C2S_HDR"
-C2S_SLOTS = ["☁ C2S_%d" % i for i in range(MAX_SLOTS)]
-S2C_HDR = "☁ S2C_HDR"
-S2C_SLOTS = ["☁ S2C_%d" % i for i in range(MAX_SLOTS)]
-CLOUD_VARIABLES = [C2S_HDR] + C2S_SLOTS + [S2C_HDR] + S2C_SLOTS     # プロジェクトに必要な 10 個
+__all__ = ["BridgeCore", "CloudBridge", "Frame"]
+
+log = logging.getLogger("cloudiamond_scratch")
+
+#: one frame on the wire = ordered writes ``[(variable name, value), ...]`` (slots, then HDR)
+
+
+def short_name(name: str) -> str:
+    """``"☁ C2S_HDR"`` / ``"C2S_HDR"`` -> ``"C2S_HDR"``."""
+    return name.replace("\u2601", "").strip()
+
+
+class BridgeCore:
+    def __init__(self, server: SecureServer, *, prefix: str = P.CLOUD_PREFIX, seq_start: int | None = None):
+        self.server = server
+        self.prefix = prefix
+        self._vals: dict[str, str] = {}           # last known value of each cloud variable
+        self._seq = (secrets.randbelow(900_000) + 1) if seq_start is None else seq_start
+        self._lock = threading.RLock()
+
+    # -- input -------------------------------------------------------------------------
+    def feed(self, name: str, value: object, *, initial: bool = False) -> list[list[tuple[str, str]]]:
+        """A cloud variable changed. Returns the frames (lists of writes) to send in response.
+
+        ``initial=True`` marks values replayed by the cloud server when we connect: they are
+        remembered but not processed, so a stale ``C2S`` frame is not handled a second time.
+        """
+        short = short_name(name)
+        if short not in P.CLOUD_VARIABLES:
+            return []
+        with self._lock:
+            self._vals[short] = value if isinstance(value, str) else _num_to_str(value)
+            if initial or short != P.VAR_C2S_HDR:
+                return []
+            parsed = P.parse_hdr(self._vals[short])
+            if parsed is None:
+                self.server.stats["drop.bad_hdr"] += 1
+                return []
+            _seq, n = parsed
+            frame = P.slots_to_frame([self._vals.get(v, "") for v in P.VAR_C2S[:n]])
+            if frame is None:
+                self.server.stats["drop.bad_slots"] += 1
+                return []
+            out = self.server.handle_frame(frame)
+            return [self._writes(out)] if out is not None else []
+
+    def push(self, sid: bytes | str, data: bytes | str) -> list[list[tuple[str, str]]]:
+        """Server-initiated message. Returns the frame to send (raises ``UnknownSession`` / ``MessageTooLarge``)."""
+        with self._lock:
+            return [self._writes(self.server.seal(sid, data))]
+
+    # -- output ------------------------------------------------------------------------
+    def _writes(self, frame: bytes) -> list[tuple[str, str]]:
+        slots = P.frame_to_slots(frame)
+        writes = [(self.prefix + P.VAR_S2C[i], s) for i, s in enumerate(slots)]
+        self._seq = (self._seq + 1) % 1_000_000
+        hdr = P.make_hdr(self._seq, len(slots))
+        if str(hdr) == self._vals.get(P.VAR_S2C_HDR):   # must differ from what the client last saw
+            self._seq = (self._seq + 1) % 1_000_000
+            hdr = P.make_hdr(self._seq, len(slots))
+        self._vals[P.VAR_S2C_HDR] = str(hdr)
+        for i, s in enumerate(slots):
+            self._vals[P.VAR_S2C[i]] = s
+        writes.append((self.prefix + P.VAR_S2C_HDR, str(hdr)))
+        return writes
 
 
 class CloudBridge:
-    def __init__(self, server: SecureServer, write: Callable[[str, str], None],
-                 seq_start: Optional[int] = None):
+    """Callback-style bridge (API of 0.1).
+
+    ``write(name, value)`` must set a cloud variable (``name`` includes the ``"☁ "`` prefix).
+    Call :meth:`on_variable` for every cloud-variable update you observe.
+    ``min_interval`` (seconds) spaces consecutive frames: a Scratch client that polls slowly can
+    miss a frame that is overwritten too soon. 0.25 is a good value for real cloud servers.
+    """
+
+    def __init__(self, server: SecureServer, write: Callable[[str, str], None], *,
+                 min_interval: float = 0.0, prefix: str = P.CLOUD_PREFIX,
+                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep):
         self.server = server
+        self.core = BridgeCore(server, prefix=prefix)
         self._write = write
-        self._values: Dict[str, str] = {}
-        self._seq = seq_start if seq_start is not None else random.SystemRandom().randrange(1, 900000)
-        self._lock = threading.Lock()
+        self._gap = min_interval
+        self._clock, self._sleep = clock, sleep
+        self._last_frame = float("-inf")
+        self._out_lock = threading.Lock()
 
-    # ---------------------------------------------------------------- 受信
-    def on_variable(self, name: str, value) -> None:
-        """クラウド変数の更新を 1 件渡す。名前が C2S_* 以外なら無視する。"""
-        if name not in C2S_SLOTS and name != C2S_HDR:
-            return
-        with self._lock:
-            self._values[name] = str(value)
-            if name != C2S_HDR:
-                return
-            # 同じ HDR を「重複」として捨てない: 別クライアントの正規フレームが偶然同じ HDR 値になり得るため。
-            # 再接続時の現在値の再送などで同じフレームが再度来ても、サーバーのリプレイ防止
-            # (既存 sid の HELLO・古いカウンタは拒否)が無害化する。
-            frames = self._decode(self._values[C2S_HDR])
-        if frames is None:
-            return
-        for reply in self.server.handle_frame(frames):
-            self._emit(reply)
+    def on_variable(self, name: str, value: object, *, initial: bool = False) -> None:
+        for frame in self.core.feed(name, value, initial=initial):
+            self._emit(frame)
 
-    def _decode(self, hdr: str) -> Optional[bytes]:
-        try:
-            n = int(hdr[-2:])
-            slots = [self._values[C2S_SLOTS[i]] for i in range(n)]
-            return from_slots(hdr, slots)[1]
-        except (ValueError, KeyError, IndexError):
-            return None                          # 壊れた値は黙って捨てる
+    def push(self, sid: bytes | str, data: bytes | str) -> None:
+        """Send a server-initiated message to ``sid`` (``UnknownSession`` if it is gone)."""
+        for frame in self.core.push(sid, data):
+            self._emit(frame)
 
-    # ---------------------------------------------------------------- 送信
-    def push(self, sid: bytes, data: bytes) -> bool:
-        """サーバー起点でクライアントへ送る(セッションが無い・長すぎる場合は False)。"""
-        frame = self.server.send(sid, data)
-        if frame is None:
-            return False
-        self._emit(frame)
-        return True
+    def _emit(self, frame: list[tuple[str, str]]) -> None:
+        with self._out_lock:                       # frames must never interleave
+            wait = self._gap - (self._clock() - self._last_frame)
+            if wait > 0:
+                self._sleep(wait)
+            for name, value in frame:
+                self._write(name, value)
+            self._last_frame = self._clock()
 
-    def _emit(self, frame: bytes) -> None:
-        with self._lock:
-            self._seq = self._seq % 999999 + 1   # 1..999999 を巡回。毎回必ず変わる
-            seq = self._seq
-        slots, hdr = to_slots(frame, seq)
-        for i, s in enumerate(slots):
-            self._write(S2C_SLOTS[i], s)
-        self._write(S2C_HDR, hdr)                # HDR を最後に書く = コミット
+
+def _num_to_str(v: object) -> str:
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v)

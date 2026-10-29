@@ -1,125 +1,78 @@
-"""
-selftest.py -- インストール直後に実行できる自己診断(pytest 不要・Node 不要・数秒)。
-
-  1. 暗号部品を、公式テストベクトルと cryptography の出力に照合する
-  2. Scratch に載せるクライアント(program.py)を Python として動かし、実物のサーバーとハンドシェイクして往復する
-  3. 生成する .sb3 が壊れていない(zip として正しく、プロジェクト JSON の参照が閉じている)ことを調べる
-
-「Scratch の VM 上でも同じ結果になること」は Node と scratch-vm が必要なので tests/ 側(pytest)で検証する。
-"""
+"""``cloudiamond-scratch selftest``: known-answer tests + an in-process protocol run."""
 from __future__ import annotations
 
-import importlib.util
-import io
 import json
-import os
-import zipfile
-from typing import Callable, List, Tuple
+import sys
+
+from . import protocol as P
+from . import sb3
+from . import text as scratch_text
+from .crypto import aead_open, aead_seal, hchacha20, x25519_public, x25519_shared
+from .keys import generate_static_key, public_key
+from .refclient import ReferenceClient
+from .server import SecureServer
 
 
-def _fresh_program():
-    from .scratch import program
-    spec = importlib.util.spec_from_file_location("cloudiamond_selftest_program", program.__file__)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-def _fill(lst, data):
-    for i, b in enumerate(data):
-        lst[i] = b
-
-
-def check_x25519_rfc7748() -> None:
-    P = _fresh_program()
+def _checks():
+    # --- known answers -------------------------------------------------------------
+    key = bytes(range(32))
+    yield "HChaCha20 (draft-irtf-cfrg-xchacha A.6.1)", hchacha20(key, bytes.fromhex("000000090000004a0000000031415927")).hex() == \
+        "82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc"
     a = bytes.fromhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
     u = bytes.fromhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c")
-    _fill(P.XK, a); _fill(P.XU, u); P.x25519()
-    assert bytes(P.XOUT[:32]).hex() == "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"
+    yield "X25519 (RFC 7748 6.1 vector)", x25519_shared(a, u).hex() == "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"
+    k2 = bytes(range(0x80, 0xA0))
+    n2 = bytes.fromhex("070000004041424344454647")
+    aad = bytes.fromhex("50515253c0c1c2c3c4c5c6c7")
+    pt = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, "
+          b"sunscreen would be it.")
+    sealed = aead_seal(k2, n2, aad, pt)
+    yield "ChaCha20-Poly1305 (RFC 8439 2.8.2 vector)", sealed[-16:].hex() == "1ae10b594f09e26a7e902ecbd0600691" and aead_open(k2, n2, aad, sealed) == pt
+    # --- protocol --------------------------------------------------------------------
+    secret = generate_static_key()
+    pub = public_key(secret)
+    srv = SecureServer(secret, on_message=lambda sid, d: b"re:" + d)
+    cli = ReferenceClient(pub)
+    reply = srv.handle_frame(cli.hello())
+    yield "handshake: client verifies the server", reply is not None and cli.accept_reply(reply)
+    # a client that expects a different server key must refuse this server's reply
+    impostor_target = ReferenceClient(public_key(generate_static_key()))
+    r = srv.handle_frame(impostor_target.hello())
+    yield "handshake: a wrong server key is detected by the client", r is not None and not impostor_target.accept_reply(r)
+    msg = cli.seal(b"ping")
+    out = srv.handle_frame(msg)
+    yield "message round trip", out is not None and cli.open(out) == b"re:ping"
+    yield "replay is dropped", srv.handle_frame(msg) is None
+    bad = bytearray(cli.seal(b"x"))
+    bad[20] ^= 1
+    yield "tampered frame is dropped", srv.handle_frame(bytes(bad)) is None
+    srv2 = SecureServer(generate_static_key())
+    cli2 = ReferenceClient(srv2.public_key)
+    cli2.accept_reply(srv2.handle_frame(cli2.hello()))
+    yield "frame for an unknown session is dropped", srv.handle_frame(cli2.seal(b"x")) is None
+    yield "dropped frames are counted, not answered", srv.stats["drop.replay"] == 1 and srv.stats["drop.auth"] == 1 \
+        and srv.stats["drop.unknown_session"] == 1
+    # --- encoding --------------------------------------------------------------------
+    f = bytes(range(256))[:200]
+    yield "slot encoding round trip", P.slots_to_frame(P.frame_to_slots(f)) == f
+    yield "Japanese text table round trip", scratch_text.decode(scratch_text.encode("こんにちは、セカイ！ abc 123")) == "こんにちは、セカイ！ abc 123"
+    # --- client file -------------------------------------------------------------------
+    data = sb3.build_sb3(pub)
+    project, assets = sb3.read_sb3(data)
+    yield "client .sb3: structure", sb3.lint_project(project) == []
+    yield "client .sb3: unmodified + audit clean", sb3.verify_project(project, assets, expected_pub=pub).ok and sb3.audit_project(project).ok
+    yield "client .sb3: build is reproducible", sb3.build_sb3(pub) == data
 
 
-def check_aead_vs_cryptography() -> None:
-    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-    P = _fresh_program()
-    key, nonce, aad, pt = os.urandom(32), os.urandom(12), os.urandom(15), os.urandom(100)
-    _fill(P.AK, key); _fill(P.AN, nonce); _fill(P.AAD, aad); P.AADL = 15
-    _fill(P.BUF, pt); P.BUFL = 100
-    P.aead_seal()
-    assert bytes(P.BUF[:100]) + bytes(P.ATAG[:16]) == ChaCha20Poly1305(key).encrypt(nonce, pt, aad)
-
-
-def check_hchacha20_vector() -> None:
-    P = _fresh_program()
-    _fill(P.HCK, bytes(range(32)))
-    _fill(P.HCN, bytes.fromhex("000000090000004a0000000031415927"))
-    P.hchacha20()
-    assert bytes(P.HCO[:32]).hex() == "82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc"
-
-
-def check_roundtrip_with_server() -> None:
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    from .server import SecureServer
-    P = _fresh_program()
-    got: List[bytes] = []
-    server = SecureServer(X25519PrivateKey.generate(), on_message=lambda sid, d: (got.append(d), d[::-1])[1])
-    _fill(P.SRV, server.public_key)
-    _fill(P.EK, os.urandom(32))
-    P.ss_reset_state(); P.ss_make_hello()
-    reply = server.handle_frame(bytes(P.TXF[:P.TXL]))[0]
-    P.RXL = len(reply); _fill(P.RXF, reply); P.ss_derive_and_verify()
-    assert P.SS_READY == 1, "サーバー認証に失敗"
-    P.SS_TX.clear()
-    for b in b"selftest":
-        P.SS_TX.append(b)
-    P.ss_seal()
-    out = server.handle_frame(bytes(P.TXF[:P.TXL]))
-    assert got == [b"selftest"] and len(out) == 1
-    P.RXL = len(out[0]); _fill(P.RXF, out[0]); P.ss_open()
-    assert P.SS_RXOK == 1 and bytes(P.SS_RX) == b"tsetfles"
-
-
-def check_sb3_is_well_formed() -> None:
-    from .scratch.build import build_client_sb3
-    pub = os.urandom(32)
-    data = build_client_sb3(pub)
-    z = zipfile.ZipFile(io.BytesIO(data))
-    assert z.testzip() is None
-    proj = json.loads(z.read("project.json"))
-    blocks = proj["targets"][1]["blocks"]
-    for bid, b in blocks.items():
-        assert b["topLevel"] or b["parent"] in blocks
-        for inp in b["inputs"].values():
-            for ref in inp[1:]:
-                if isinstance(ref, str):
-                    assert ref in blocks
-    lists = {v[0]: v[1] for v in proj["targets"][1]["lists"].values()}
-    assert lists["SRV"] == list(pub)
-    # 秘密になり得るリストが出荷物に最初から入っていない
-    for name in ("EK", "KC2S", "KS2C", "DHES", "DHEE", "MASTER"):
-        assert not any(lists[name]), name
-
-
-CHECKS: List[Tuple[str, Callable[[], None]]] = [
-    ("X25519 (RFC 7748 ベクトル)", check_x25519_rfc7748),
-    ("HChaCha20 (公式ベクトル)", check_hchacha20_vector),
-    ("ChaCha20-Poly1305 (cryptography と一致)", check_aead_vs_cryptography),
-    ("クライアント <-> サーバー ハンドシェイクと往復", check_roundtrip_with_server),
-    (".sb3 の整合性", check_sb3_is_well_formed),
-]
-
-
-def run(verbose: bool = True) -> int:
+def run(verbose: bool = False) -> int:
     failed = 0
-    for name, fn in CHECKS:
-        try:
-            fn()
-            ok = True
-        except Exception as e:                 # 診断なので、何が壊れたかを必ず表示する
-            ok = False
-            err = "%s: %s" % (type(e).__name__, e)
-        if verbose:
-            print(("  OK    " if ok else "  FAIL  ") + name + ("" if ok else "\n        " + err))
-        failed += 0 if ok else 1
-    if verbose:
-        print("selftest: %s" % ("すべて合格" if not failed else "%d 件失敗" % failed))
-    return 1 if failed else 0
+    for name, ok in _checks():
+        if not ok:
+            failed += 1
+        if verbose or not ok:
+            print(("  ok   " if ok else "  FAIL ") + name)
+    if failed:
+        print(f"selftest: {failed} check(s) FAILED", file=sys.stderr)
+        return 1
+    print("selftest: all checks passed")
+    return 0
