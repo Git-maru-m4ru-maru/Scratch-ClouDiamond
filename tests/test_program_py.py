@@ -304,7 +304,9 @@ def test_foreign_session_id_is_ignored(P):
     server, _ = make_server()
     fill(P.SRV, server.public_key); fill(P.EK, os.urandom(32))
     P.ss_reset_state(); P.ss_make_hello()
-    reply = bytearray(server.handle_frame(read(P.TXF, P.TXL))[0])
+    initial_reply = server.handle_frame(read(P.TXF, P.TXL))
+    assert initial_reply is not None
+    reply = bytearray(initial_reply)
     reply[0] ^= 1
     P.RXL = 73; fill(P.RXF, bytes(reply)); P.ss_derive_and_verify()
     assert P.SS_READY == 0 and P.SS_TRIES == 0         # 自分宛てでなければ計算もしない
