@@ -1,7 +1,7 @@
 name: Publish to PyPI
 
-# Release published  -> PyPI      (environment "pypi")
-# Manual run         -> TestPyPI  (environment "testpypi")
+# Release published  -> PyPI (environment "pypi")
+# Manual run          -> PyPI after tests and version/release validation
 on:
   release:
     types: [published]
@@ -27,6 +27,20 @@ jobs:
           if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
             echo "tag ${GITHUB_REF_NAME} != v${VERSION}"; exit 1
           fi
+      - name: Manual publish must match an existing GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python - <<'PY'
+          import tomllib
+          print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])
+          PY
+          )
+          RELEASE_TAG=$(gh release view "v${VERSION}" --json tagName --jq .tagName)
+          if [ "${RELEASE_TAG}" != "v${VERSION}" ]; then
+            echo "No matching GitHub release for v${VERSION}"; exit 1
+          fi
       - run: python -m pip install -e ".[test]"
       - run: python -m pytest -q
       - run: python -m build
@@ -36,24 +50,8 @@ jobs:
           name: dist
           path: dist/
 
-  publish-testpypi:
-    if: github.event_name == 'workflow_dispatch'
-    needs: build
-    runs-on: ubuntu-latest
-    environment: testpypi
-    permissions:
-      id-token: write       # Trusted Publishing (no API token stored in GitHub)
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
   publish-pypi:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
