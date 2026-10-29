@@ -15,9 +15,9 @@ import zipfile
 import pytest
 import cloudiamond_scratch.protocol as P
 import cloudiamond_scratch.server as ss
-from cloudiamond_scratch.keys import public_key
+from cloudiamond_scratch.keys import parse_secret, public_key
 from cloudiamond_scratch import cli
-from cloudiamond_scratch.bridge import CloudBridge
+from cloudiamond_scratch.bridge import CloudBridge, short_name
 from cloudiamond_scratch.protocol import (
     CLOUD_VARIABLES,
     VAR_C2S_HDR as C2S_HDR,
@@ -39,40 +39,38 @@ def test_keygen_creates_private_key_with_0600_and_is_idempotent(tmp_path, capsys
     assert run_cli("keygen", str(key)) == 0
     out1 = capsys.readouterr().out
     assert stat.S_IMODE(os.stat(key).st_mode) == 0o600
-    raw = key.read_bytes()
+    file_bytes = key.read_bytes()
+    raw = parse_secret(file_bytes)
     assert len(raw) == 32
     pub = public_key(raw)
-    assert pub.hex() in out1 and raw.hex() not in out1      # 画面に秘密鍵を出さない
-    assert run_cli("keygen", str(key)) == 0                  # 2 回目は既存の鍵を壊さない
-    assert key.read_bytes() == raw
+    assert pub.hex() in out1 and raw.hex() not in out1       # 画面に秘密鍵を出さない
+    assert run_cli("keygen", str(key)) != 0                  # 既存の鍵は上書きしない
+    assert key.read_bytes() == file_bytes
     assert run_cli("pubkey", "--key", str(key)) == 0 and pub.hex() in capsys.readouterr().out
 
 
 def test_pubkey_and_build_require_existing_key(tmp_path):
-    with pytest.raises(SystemExit):
-        run_cli("pubkey", str(tmp_path / "missing.key"))
-    with pytest.raises(SystemExit):
-        run_cli("build", "--key", str(tmp_path / "missing.key"), "-o", str(tmp_path / "x.sb3"))
+    assert run_cli("pubkey", "--key", str(tmp_path / "missing.key")) != 0
+    assert run_cli("build", "--key", str(tmp_path / "missing.key"), "-o", str(tmp_path / "x.sb3")) != 0
     assert not (tmp_path / "missing.key").exists()           # build が勝手に鍵を作ってしまわない
     assert not (tmp_path / "x.sb3").exists()
 
 
 @pytest.mark.parametrize("bad", ["zz", "00" * 31, "00" * 33, "00" * 32, ""])
 def test_build_rejects_bad_public_keys(tmp_path, bad):
-    with pytest.raises(SystemExit):
-        run_cli("build", "--pub", bad, "-o", str(tmp_path / "x.sb3"))
+    assert run_cli("build", "--pub", bad, "-o", str(tmp_path / "x.sb3")) != 0
     assert not (tmp_path / "x.sb3").exists()
 
 
 def test_build_key_and_pub_are_mutually_exclusive(tmp_path):
-    with pytest.raises(SystemExit):
-        run_cli("build", "--key", "a", "--pub", "00" * 32)
+    assert run_cli("build", "--key", "a", "--pub", "00" * 32) != 0
 
 
 def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path):
     key = tmp_path / "server.key"
     run_cli("keygen", str(key))
-    priv = key.read_bytes()
+    key_file_bytes = key.read_bytes()
+    priv = parse_secret(key_file_bytes)
     pub = public_key(priv)
     out = tmp_path / "client.sb3"
     assert run_cli("build", "--key", str(key), "-o", str(out)) == 0
@@ -110,7 +108,7 @@ def test_sb3_ships_with_no_secret_state_and_expected_cloud_variables():
         assert not any(lists[name]), name
     assert lists["🔒 TX bytes"] == [] and lists["🔒 RX bytes"] == []
     cloud = [v for v in stage["variables"].values()]
-    assert sorted(v[0] for v in cloud) == sorted(CLOUD_VARIABLES) and all(v[2] is True for v in cloud)
+    assert sorted(short_name(v[0]) for v in cloud) == sorted(CLOUD_VARIABLES) and all(v[2] is True for v in cloud)
     assert len(cloud) == 10                                  # Scratch の上限ちょうど
     vars_ = {v[0]: v[1] for v in sprite["variables"].values()}
     assert vars_["🔒 connected"] == 0 and vars_["🔒 received text"] == ""
@@ -143,11 +141,11 @@ class Wire:
         self.writes.append((name, value))
 
     def last_frame(self):
-        hdr = [v for n, v in self.writes if n == S2C_HDR][-1]
+        hdr = [v for name, v in self.writes if short_name(name) == S2C_HDR][-1]
         n = int(hdr[-2:])
         cur = {}
-        for name, v in self.writes:                    # 最後の HDR の直前までに書かれた slot を使う
-            cur[name] = v
+        for name, value in self.writes:                 # 最後の HDR の直前までに書かれた slot を使う
+            cur[short_name(name)] = value
         return from_slots(hdr, [cur[S2C_SLOTS[i]] for i in range(n)])
 
 
@@ -193,13 +191,13 @@ def test_bridge_full_session_through_cloud_variable_encoding():
     groups, cur = [], []
     for name, value in wire.writes:
         cur.append((name, value))
-        if name == S2C_HDR:
+        if short_name(name) == S2C_HDR:
             groups.append(cur)
             cur = []
     assert cur == [] and len(groups) == 2                  # 最後の HDR の後に書き込みが残っていない
     for g in groups:
         *slots, (hname, hval) = g
-        assert hname == S2C_HDR and [n for n, _ in slots] == S2C_SLOTS[:int(hval[-2:])]
+        assert short_name(hname) == S2C_HDR and [short_name(n) for n, _ in slots] == S2C_SLOTS[:int(hval[-2:])]
 
 
 def test_bridge_header_always_changes_even_across_sessions():
@@ -208,7 +206,7 @@ def test_bridge_header_always_changes_even_across_sessions():
     for _ in range(5):
         client = cr.ScratchClient(list(server.public_key), list(os.urandom(32)))
         feed(bridge, bytes(client.hello()), 1)
-        hdrs.append([v for n, v in wire.writes if n == S2C_HDR][-1])
+        hdrs.append([v for n, v in wire.writes if short_name(n) == S2C_HDR][-1])
     assert len(set(hdrs)) == 5                                  # 新しいセッションの最初の返信でも HDR は前回と違う
     b2 = CloudBridge(server, Wire())
     b2.core._seq = 999_999
