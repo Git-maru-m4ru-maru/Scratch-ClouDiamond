@@ -158,8 +158,8 @@ def make_pair(server_key=None, pinned_pub=None, on_message=None):
 
 def handshake(server, client):
     out = server.handle_frame(bytes(client.hello()))
-    assert len(out) == 1 and len(out[0]) == 73
-    return out[0], client.on_reply(L(out[0]))
+    assert out is not None and len(out) == 73
+    return out, client.on_reply(L(out))
 
 
 def test_full_session_interop_both_directions():
@@ -168,9 +168,9 @@ def test_full_session_interop_both_directions():
     assert ok
     for msg in (b"hello", b"", b"x" * 31, b"\x00\xff" * 70, "日本語のメッセージ🔐".encode()):
         frame = bytes(client.seal(L(msg)))
-        replies = server.handle_frame(frame)
-        assert got[-1] == msg and len(replies) == 1
-        assert bytes(client.open(L(replies[0]))) == b"echo:" + msg
+        reply = server.handle_frame(frame)
+        assert got[-1] == msg and reply is not None
+        assert bytes(client.open(L(reply))) == b"echo:" + msg
     pushed = server.send(bytes(client.sid), b"server-push")          # サーバー起点
     assert bytes(client.open(L(pushed))) == b"server-push"
 
@@ -183,7 +183,10 @@ def test_eavesdropper_sees_no_plaintext_and_cannot_decrypt():
     assert ok
     secret = b"TOP-SECRET-PASSWORD-1234567890"
     f = bytes(client.seal(L(secret)))
-    transcript += [f] + server.handle_frame(f)
+    transcript.append(f)
+    reply = server.handle_frame(f)
+    assert reply is not None
+    transcript.append(reply)
     assert all(secret not in t and b"TOP-SECRET" not in t for t in transcript)
     # 盗聴者が持つ情報だけ(E, R, S, 全フレーム)から鍵を作ろうとしても復号できない
     E, R = transcript[0][9:], transcript[1][9:41]
@@ -209,22 +212,23 @@ def test_tamper_any_bit_is_dropped_and_session_survives():
     for _ in range(80):
         i, bit = rnd.randrange(len(good)), 1 << rnd.randrange(8)
         bad = bytearray(good); bad[i] ^= bit
-        assert server.handle_frame(bytes(bad)) == []
+        assert server.handle_frame(bytes(bad)) is None
     assert got == []                                       # 1回も届いていない
-    assert len(server.handle_frame(good)) == 1 and got == [b"payload"]   # 本物は通る(状態が壊れていない)
+    assert server.handle_frame(good) is not None and got == [b"payload"]   # 本物は通る(状態が壊れていない)
 
 
 def test_replay_rejected_both_directions():
     server, client, got = make_pair()
     handshake(server, client)
     f1 = bytes(client.seal(L(b"one")))
-    reply = server.handle_frame(f1)[0]
-    assert server.handle_frame(f1) == [] and got == [b"one"]          # c2s の再送
+    reply = server.handle_frame(f1)
+    assert reply is not None
+    assert server.handle_frame(f1) is None and got == [b"one"]          # c2s の再送
     assert client.open(L(reply)) is not None
     assert client.open(L(reply)) is None                               # s2c の再送
     f2, f3 = bytes(client.seal(L(b"two"))), bytes(client.seal(L(b"three")))
     server.handle_frame(f3)
-    assert server.handle_frame(f2) == []                               # 巻き戻し(古い ctr)
+    assert server.handle_frame(f2) is None                               # 巻き戻し(古い ctr)
 
 
 def test_wrong_direction_or_reflection_rejected():
@@ -233,13 +237,15 @@ def test_wrong_direction_or_reflection_rejected():
     f = bytes(client.seal(L(b"hi")))
     assert client.open(L(f)) is None                                   # 自分の送信を「受信」として反射
     refl = bytearray(f); refl[8] = ss.T_S2C
-    assert server.handle_frame(bytes(refl)) == []
+    assert server.handle_frame(bytes(refl)) is None
 
 
 def test_mitm_replaces_R_with_server_static_key():
     """R := S にすると dh_ee == dh_es になる(XOR 型の鍵結合ならここで鍵がゼロに崩壊する)。"""
     server, client, _ = make_pair()
-    reply = bytearray(server.handle_frame(bytes(client.hello()))[0])
+    first_reply = server.handle_frame(bytes(client.hello()))
+    assert first_reply is not None
+    reply = bytearray(first_reply)
     reply[9:41] = server.public_key
     assert client.on_reply(L(bytes(reply))) is False and not client.ready
 
@@ -248,7 +254,8 @@ def test_fake_server_with_different_key_rejected():
     real = X25519PrivateKey.generate()
     fake_server = ss.SecureServer(X25519PrivateKey.generate(), on_message=lambda s, d: d)
     client = cr.ScratchClient(L(real.public_key().public_bytes_raw()), L(os.urandom(32)))
-    reply = fake_server.handle_frame(bytes(client.hello()))[0]
+    reply = fake_server.handle_frame(bytes(client.hello()))
+    assert reply is not None
     assert client.on_reply(L(reply)) is False
 
 
@@ -257,7 +264,7 @@ def test_active_attacker_cannot_forge_reply_without_server_key():
     attacker_r = X25519PrivateKey.generate()
     E = bytes(client.hello())[9:]
     dh = attacker_r.exchange(X25519PublicKey.from_public_bytes(E))
-    k_c2s, k_s2c = ss.derive_keys(dh, dh)                  # 攻撃者が自分で作れる鍵
+    _master, k_c2s, k_s2c = ss.derive_keys(dh, dh)         # 攻撃者が自分で作れる鍵
     R = attacker_r.public_key().public_bytes_raw()
     sid = bytes(client.sid)
     confirm = ChaCha20Poly1305(k_s2c).encrypt(ss.nonce_for(0), ss.READY, sid + bytes([2]) + E + R)
@@ -268,7 +275,7 @@ def test_low_order_points_rejected_by_server_and_client():
     server, client, _ = make_pair()
     for bad in (bytes(32), (1).to_bytes(32, "little")):    # u=0, u=1 は位数が小さい
         E = bad
-        assert server.handle_frame(E[:8] + b"\x01" + E) == []
+        assert server.handle_frame(E[:8] + b"\x01" + E) is None
     assert server.session_count() == 0
     # クライアント側: サーバー(攻撃者)が R=0 を返してきた
     reply = bytearray(server.handle_frame(bytes(client.hello()))[0])
@@ -279,12 +286,12 @@ def test_low_order_points_rejected_by_server_and_client():
 def test_hello_rules():
     server, client, _ = make_pair()
     h = bytes(client.hello())
-    assert len(server.handle_frame(h)) == 1
-    assert server.handle_frame(h) == []                    # 同じ sid の 2 回目は無視
+    assert server.handle_frame(h) is not None
+    assert server.handle_frame(h) is None                    # 同じ sid の 2 回目は無視
     other = cr.ScratchClient(L(server.public_key), L(os.urandom(32)))
     hh = bytearray(other.hello()); hh[0] ^= 1              # sid != E[:8]
-    assert server.handle_frame(bytes(hh)) == []
-    assert server.handle_frame(h[:-1]) == [] and server.handle_frame(b"") == []   # 壊れた入力で落ちない
+    assert server.handle_frame(bytes(hh)) is None
+    assert server.handle_frame(h[:-1]) is None and server.handle_frame(b"") is None   # 壊れた入力で落ちない
 
 
 def test_garbage_never_crashes_server():
@@ -296,7 +303,7 @@ def test_garbage_never_crashes_server():
         junk = bytearray(rnd.randrange(256) for _ in range(n))
         if n > 9 and rnd.random() < .7:
             junk[:8] = bytes(client.sid); junk[8] = rnd.choice([1, 2, 3, 4])
-        assert server.handle_frame(bytes(junk)) == []
+        assert server.handle_frame(bytes(junk)) is None
 
 
 def test_forward_secrecy_static_key_leak_is_not_enough():
@@ -322,11 +329,12 @@ def test_session_expiry_and_limits():
     c2 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     c3 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     for c in (c1, c2):
-        assert c.on_reply(L(srv.handle_frame(bytes(c.hello()))[0]))
-    assert srv.handle_frame(bytes(c3.hello())) == []        # 満員
+        reply = srv.handle_frame(bytes(c.hello()))
+        assert reply is not None and c.on_reply(L(reply))
+    assert srv.handle_frame(bytes(c3.hello())) is None      # 満員
     t[0] = 11                                               # アイドル超過 -> 掃除される
-    assert srv.handle_frame(bytes(c1.seal(L(b"late")))) == []
-    assert len(srv.handle_frame(bytes(c3.hello()))) == 1
+    assert srv.handle_frame(bytes(c1.seal(L(b"late")))) is None
+    assert srv.handle_frame(bytes(c3.hello())) is not None
 
 
 def test_hello_rate_limit():
@@ -334,13 +342,14 @@ def test_hello_rate_limit():
     n = 0
     for _ in range(10):
         c = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
-        n += len(srv.handle_frame(bytes(c.hello())))
+        n += int(srv.handle_frame(bytes(c.hello())) is not None)
     assert n == 3
 
 
 def test_client_limits_reply_flood():
     server, client, _ = make_pair()
-    real = server.handle_frame(bytes(client.hello()))[0]
+    real = server.handle_frame(bytes(client.hello()))
+    assert real is not None
     fake = bytearray(real); fake[-1] ^= 1
     for _ in range(cr.MAX_REPLY_TRIES):
         assert client.on_reply(L(bytes(fake))) is False
@@ -373,7 +382,7 @@ def test_max_message_size_fits_in_slots():
     assert len(frame) <= ss.MAX_SLOTS * ss.SLOT_BYTES
     ss.to_slots(frame, 0)                                  # 4 slot に収まる
     reply = server.handle_frame(frame)
-    assert len(reply) == 1 and bytes(client.open(L(reply[0]))) == b"ok"
+    assert reply is not None and bytes(client.open(L(reply))) == b"ok"
     # サーバーが上限超えの返信を作ろうとしたら黙って捨てる(スロットに入らないため)
     assert server.send(bytes(client.sid), b"x" * (ss.DEFAULT_MAX_PLAIN + 1)) is None
 
@@ -382,7 +391,8 @@ def test_full_session_over_cloud_variable_encoding():
     server, client, got = make_pair()
     slots, hdr = ss.to_slots(bytes(client.hello()), 1)
     out = server.handle_frame(ss.from_slots(hdr, slots)[1])
-    slots, hdr = ss.to_slots(out[0], 1)
+    assert out is not None
+    slots, hdr = ss.to_slots(out, 1)
     assert slots and client.on_reply(L(ss.from_slots(hdr, slots)[1]))
     msg = os.urandom(200)
     slots, hdr = ss.to_slots(bytes(client.seal(L(msg))), 2)
