@@ -232,11 +232,11 @@ cloudiamond-scratch verify downloaded.sb3 --pub <配布元が示した公開鍵>
    - 0.1 で使っていた `scratch-vm` による通しテストを、この `.sb3` に対して実行する(接続 → 往復 → 鍵が消えること)。
    - 実際のクラウド変数サーバーにつないで、`🔒 request [こんにちは]` が往復すること。HELLO 再送は、サーバーの起動を遅らせて 6〜12 秒後に接続できるかで確認できます。
    - 接続後に `🔒 wipe secrets` を実行して保存し、`cloudiamond-scratch audit` が通ること。
-3. `python -m build` → `twine check --strict dist/*` → まず **TestPyPI** で `pip install` と `cloudiamond-scratch selftest` を試す。
+3. `python -m build` → `twine check --strict dist/*` → `pytest -q` で確認する。このリポジトリの公開ワークフローも、テスト・ビルド・メタデータ検査に成功しない限りアップロードしません。
 4. `pyproject.toml` の `authors`(作者名・連絡先。メールアドレスは PyPI で公開されます)を決めて追記する。`[project.urls]` は元のリポジトリの URL を入れてあります。LICENSE は MIT(著作権表示は「cloudiamond-scratch contributors」)。
 5. アップロード:
    - **API トークンで手動:** `python -m twine upload dist/*`(ユーザー名 `__token__`、パスワード = トークン。環境変数 `TWINE_PASSWORD` に入れ、コマンド履歴・チャット・Git・Scratch に**絶対に書かない**。万一漏れたらすぐ PyPI で失効させる。可能ならプロジェクト限定のトークン)。
-   - **GitHub Actions(Trusted Publishing。トークン不要):** `.github/workflows/publish.yml`。Release を公開すると PyPI へ、Actions 画面からの手動実行で TestPyPI へ。登録(Pending publisher)には Project `cloudiamond-scratch`、Workflow `publish.yml`、Environment `pypi` / `testpypi` を入れ、GitHub 側にも同名の Environment を作る(`pypi` には Required reviewers を推奨)。Release のタグは `v1.0.0`(`pyproject.toml` と違えば公開前に止まります)。
+   - **GitHub Actions(Trusted Publishing。トークン不要):** `.github/workflows/publish.yml`。Release を公開すると PyPI へ、手動実行も本番 PyPI へアップロードします。手動実行では、`pyproject.toml` のバージョンに一致する GitHub Release が存在することを確認してから、テスト・ビルド・メタデータ検査を行います。PyPI の Trusted Publisher(Pending publisher)には Project `cloudiamond-scratch`、Workflow `publish.yml`、Environment `pypi` を登録し、GitHub 側にも `pypi` Environment を作ってください(`Required reviewers` を設定している場合は承認が必要です)。Release のタグは `v1.0.0` のように `pyproject.toml` のバージョンと一致させます。
 6. Release に `releases/ClouDiamond_v1.0.0_DEMO.sb3` と `SHA256SUMS` を添える。**デモ用の鍵は秘密鍵が公開されています**(`examples/demo_server.key`)。実際のデータには使わず、本番用は自分の `server.key` で `build` し直してください(`build` / `serve` はデモ鍵を使うと警告します)。
 
 ## 開発
