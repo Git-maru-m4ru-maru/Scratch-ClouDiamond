@@ -50,12 +50,10 @@ class BridgeCore:
         if short not in P.CLOUD_VARIABLES:
             return []
         with self._lock:
-            normalized = value if isinstance(value, str) else _num_to_str(value)
-            previous = self._vals.get(short)
-            self._vals[short] = normalized
-            if initial or short != P.VAR_C2S_HDR or normalized == previous:
+            self._vals[short] = value if isinstance(value, str) else _num_to_str(value)
+            if initial or short != P.VAR_C2S_HDR:
                 return []
-            parsed = P.parse_hdr(normalized)
+            parsed = P.parse_hdr(self._vals[short])
             if parsed is None:
                 self.server.stats["drop.bad_hdr"] += 1
                 return []
