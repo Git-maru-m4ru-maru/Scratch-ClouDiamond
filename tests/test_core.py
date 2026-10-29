@@ -328,15 +328,24 @@ def test_forward_secrecy_static_key_leak_is_not_enough():
 
 def test_session_expiry_and_limits():
     t = [0.0]
-    srv = ss.SecureServer(os.urandom(32), on_message=lambda s, d: d, idle_timeout=10, max_sessions=2, clock=lambda: t[0])
+    srv = ss.SecureServer(
+        os.urandom(32),
+        on_message=lambda s, d: d,
+        session_ttl=10,
+        handshake_ttl=10,
+        max_sessions=2,
+        clock=lambda: t[0],
+    )
     c1 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     c2 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     c3 = cr.ScratchClient(L(srv.public_key), L(os.urandom(32)))
     for c in (c1, c2):
         reply = srv.handle_frame(bytes(c.hello()))
         assert reply is not None and c.on_reply(L(reply))
-    assert srv.handle_frame(bytes(c3.hello())) is None      # 満員
-    t[0] = 11                                               # アイドル超過 -> 掃除される
+    # Capacity management evicts a pending handshake before an established session.
+    assert srv.handle_frame(bytes(c3.hello())) is not None
+    assert len(srv.sessions) == 2
+    t[0] = 11                                               # pending handshakes expire
     assert srv.handle_frame(bytes(c1.seal(L(b"late")))) is None
     assert srv.handle_frame(bytes(c3.hello())) is not None
 
