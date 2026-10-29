@@ -278,7 +278,9 @@ def test_low_order_points_rejected_by_server_and_client():
         assert server.handle_frame(E[:8] + b"\x01" + E) is None
     assert server.session_count() == 0
     # クライアント側: サーバー(攻撃者)が R=0 を返してきた
-    reply = bytearray(server.handle_frame(bytes(client.hello()))[0])
+    first_reply = server.handle_frame(bytes(client.hello()))
+    assert first_reply is not None
+    reply = bytearray(first_reply)
     reply[9:41] = bytes(32)
     assert client.on_reply(L(bytes(reply))) is False
 
