@@ -111,8 +111,6 @@ def build_project(pub: bytes, *, name: str = DEFAULT_NAME, demo: bool = True) ->
     """The ``project.json`` of the client for the server public key ``pub``."""
     if len(pub) != 32:
         raise ValueError("public key must be 32 bytes")
-    if not any(pub):
-        raise ValueError("public key must not be all zero")
     name = name.strip()
     if not name or len(name) > 40 or any(ord(c) < 32 for c in name):
         raise ValueError("name must be 1..40 printable characters")
@@ -139,6 +137,10 @@ def _dump(project: dict) -> bytes:
 
 def build_sb3(pub: bytes, *, name: str = DEFAULT_NAME, demo: bool = True) -> bytes:
     """A ready-to-open ``.sb3`` (zip) for the server public key ``pub``."""
+    if len(pub) != 32:
+        raise ValueError("public key must be 32 bytes")
+    if not any(pub):
+        raise ValueError("public key must not be all zero")
     files = {"project.json": _dump(build_project(pub, name=name, demo=demo))}
     files.update(_assets())
     buf = io.BytesIO()
