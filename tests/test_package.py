@@ -84,7 +84,7 @@ def test_built_sb3_embeds_only_the_public_key_and_never_the_private_key(tmp_path
     assert P.encode_slot(priv) not in text
     # 公開鍵は SRV リストに入っている
     proj = json.loads(z.read("project.json"))
-    sprite = next(target for target in proj["targets"] if not target["isStage"])
+    sprite = next(target for target in proj["targets"] if not target["isStage"] and target["blocks"])
     lists = {v[0]: v[1] for v in sprite["lists"].values()}
     assert lists["SRV"] == list(pub)
     # --pub でも同じ .sb3 が得られる
