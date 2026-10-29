@@ -288,8 +288,10 @@ def test_low_order_points_rejected_by_server_and_client():
 def test_hello_rules():
     server, client, _ = make_pair()
     h = bytes(client.hello())
-    assert server.handle_frame(h) is not None
-    assert server.handle_frame(h) is None                    # 同じ sid の 2 回目は無視
+    first = server.handle_frame(h)
+    assert first is not None
+    assert server.handle_frame(h) == first                   # 再送には同じ返信を返す
+    assert len(server.sessions) == 1
     other = cr.ScratchClient(L(server.public_key), L(os.urandom(32)))
     hh = bytearray(other.hello()); hh[0] ^= 1              # sid != E[:8]
     assert server.handle_frame(bytes(hh)) is None
