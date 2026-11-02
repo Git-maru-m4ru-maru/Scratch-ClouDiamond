@@ -1,0 +1,16 @@
+include LICENSE README.md CHANGELOG.md SECURITY.md pytest.ini
+
+# Whole directories, not file extensions: listing extensions is how a test helper (for example a .js harness) gets left
+# out of the sdist. The CI "sdist self-test" step unpacks the sdist and runs the tests from it to catch any such gap.
+graft docs
+graft examples
+graft tests
+graft tools
+
+include src/cloudiamond_scratch/data/*.json
+include src/cloudiamond_scratch/data/*.svg
+
+prune tests/node_modules
+prune tools/node_modules
+prune examples/node_modules
+global-exclude __pycache__ *.pyc *.pyo .DS_Store
